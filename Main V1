@@ -1,0 +1,2406 @@
+from datetime import datetime
+import os
+import numpy
+import pandas
+import random
+import viz
+import vizmat
+import vizact
+import vizproximity
+import vizshape
+import vizfx
+import re
+import vizinfo
+import vizinput
+import vizconnect
+import functools
+import viztask
+import custom
+import utils.file_handling as fh
+import utils.pedestrian_actions as pa
+import SoundVibration
+viz.setMultiSample(12)
+viz.setOption("viz.model.cache", viz.CACHE_CLONE)
+path_parent = os.path.dirname(os.getcwd())
+os.chdir(path_parent)
+# Vizconnect setup ---------------------------------------------------
+
+
+def vizconnectSetup(config):
+    vizconnect_dict = {'Vive Pro': 'vive_pro.py',
+                       'Desktop': 'desktop.py'}
+    vizconnect_path = '\\Scripts\\vizconnect_configs\\{}'.format(vizconnect_dict[config])
+    
+    return vizconnect.ConfigurationManager.add(path_parent + vizconnect_path)
+
+
+
+# Dictionary of Vizconnect Files
+
+vizconnect_configs = ['Vive Pro', 'Desktop']
+
+
+# If using vive pro or StarVR One record pupil data
+
+# Experiment Configuration  --------------------------------------------
+
+configureWindow = viz.addWindow(size=(1, 1), pos=(0, 1), clearMask=0, scene=viz.addScene())
+
+def get_gui_input():
+    participantInfo = vizinfo.InfoPanel('', title='Participant Information', icon=False, window=configureWindow)
+    configs = viz.addDropList()
+    configs.addItems(['Vive Pro', 'Desktop'])
+    vizconnect_config = participantInfo.addLabelItem('Vizconnect Configuration', configs)
+    participantNum = participantInfo.addLabelItem('Participant Number (\'201\'', viz.addTextbox())
+    avatarNum = participantInfo.addLabelItem('Avatar Number (\'m001\')', viz.addTextbox())
+    participantInfo.addSeparator()
+    debugMode = participantInfo.addLabelItem('Debug Mode', viz.addCheckbox())
+    recovery = participantInfo.addLabelItem('Recovering?', viz.addCheckbox())
+    recoveryTrial = participantInfo.addLabelItem('Recovery Trial', viz.addTextbox())
+    okbutton = viz.addButton()
+    okbutton.message("Submit")
+    okbutton.setScale(2, 2)
+    ok = participantInfo.addItem(okbutton)
+    yield viztask.waitTrue(lambda: ok.get() == viz.DOWN)
+    inputDict = {
+        'pid': participantNum.get(),
+        'avatarNum': avatarNum.get(),
+        'debug': debugMode.get(),
+        'recover': recovery.get(),
+        'startFrom': recoveryTrial.get(),
+        'vizconnect_config': vizconnect_config.getItem(vizconnect_config.getSelection())
+    }
+    participantInfo.setPanelVisible(viz.TOGGLE)
+    print("input collected")
+    viztask.returnValue(inputDict)
+
+inputDict = None
+pid = None
+debug = None
+recover = None
+startFrom = None
+
+# Standard Viz Actions
+fadeIn = vizact.fadeCompositeTo(1, time=.5)
+fadeOut = vizact.fadeCompositeTo(0, time=.5)
+
+if debug:
+    order = int(viz.input("1 = Local Road first, 2 = Midblock first"))
+    practiceTrials = viz.ask("Run practice trials?")
+elif not debug and not recover:
+    order = random.randint(1, 2)
+    practiceTrials = True
+
+# Environment & Lighting Setup  ----------------------------------------
+# Read Vizconnect settings
+
+participant = viz.MainView
+headLight = participant.getHeadLight()
+headLight.disable()
+
+# Change working directory to one folder above
+# path_parent = os.path.dirname(os.getcwd())
+# os.chdir(path_parent)
+
+# Import the static environment model
+# Local Road
+localRoadEnvironment = vizfx.addChild(os.path.realpath(os.path.join(os.getcwd(
+), 'Assets', 'Environments', 'vizard_osgb', 'LocalRoad_Environment_opt.osgb')), parent=viz.WORLD, cache=viz.CACHE_CLONE)
+localRoadEnvironment_Border = viz.addChild(
+    os.path.realpath(
+        os.path.join(os.getcwd(
+            ), 'Assets', 'Environments', 'vizard_osgb', 'LocalRoad_Boundary.osgb')), 
+    parent=localRoadEnvironment,
+    flags=viz.LOAD_ASYNC, cache=viz.CACHE_CLONE)
+localRoadEnvironment_Border.setParent(localRoadEnvironment)
+localRoadEnvironment.enable(viz.LIGHTING)
+localRoadEnvironment.setPosition(0, 0, 0)
+localRoadFixations = vizfx.addChild(os.path.realpath(os.path.join(os.getcwd(
+), 'Assets', 'Environments', 'vizard_osgb', 'LocalRoad_FixationZones.osgb')), parent=viz.WORLD)
+
+# Midblock Crossing
+midblockCrossingEnvironment = vizfx.addChild(os.path.realpath(os.path.join(os.getcwd(
+), 'Assets', 'Environments', 'vizard_osgb', 'MidblockCrossing_Environment.osgb')), parent=viz.WORLD,
+    cache=viz.CACHE_CLONE)
+midblockCrossingEnvironment_Border = viz.addChild(os.path.realpath(os.path.join(os.getcwd(
+), 'Assets', 'Environments', 'vizard_osgb', 'MidblockCrossing_Border.osgb')), parent=midblockCrossingEnvironment,
+    flags=viz.LOAD_ASYNC, cache=viz.CACHE_CLONE)
+midblockCrossingEnvironment_Border.setParent(midblockCrossingEnvironment)
+midblockCrossingEnvironment.enable(viz.LIGHTING)
+midblockCrossingEnvironment.setPosition(1.5, 0, 0)
+midblockCrossingFixations = vizfx.addChild(os.path.realpath(os.path.join(os.getcwd(
+), 'Assets', 'Environments', 'vizard_osgb', 'Midblock_FixationZones.osgb')), parent=viz.WORLD)
+
+# Skybox
+skyDome = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'Environments', 'vizard_osgb', 'skydome.osgb')))
+
+lighting = viz.addLight()
+lighting.setPosition(0, 1, 0)
+lighting.intensity(1)
+lighting.setEuler(0, 90, 0)
+
+
+def loadEnvironment(environment):
+    environment.visible(viz.ON)
+    environment.runAction(fadeIn)
+    yield viztask.waitActionEnd(environment, fadeIn)
+
+
+def UnloadEnvironment(environment):
+    environment.runAction(fadeOut)
+    environment.visible(viz.OFF)
+    yield viztask.waitActionEnd(environment, fadeOut)
+
+
+
+# Import the car, eHMI. Attach eHMI to car, position it on front
+av = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'AV', 'revision_vehicles', 'tes_3', 'tesla_car2.osgb')))
+av_fixationregions = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'AV', 'av_fixationregions.osgb')), parent=av)
+
+# If the driver is male, they need to be positioned differently within the car.
+def vehicleDriverAdjustment(isMale):
+    print("[Driver]: Adjusting seats.")
+    if isMale:
+        seats = av.getChild('all_seats')
+        seats.setPosition(0, 0.0, 0, mode=viz.ABS_PARENT)
+    else:
+        seats = av.getChild('all_seats')
+        seats.setPosition(0, 0.075, .0, mode=viz.ABS_PARENT)
+    print("[Driver]: Seat adjustment complete.")
+
+
+def driverSetup():
+    # Make sure the driver isn't the same as either pedestrian
+    av_driver = active_pedestrians[len(active_pedestrians) - 1]
+    isMale = str(previous_pedestrian_keys[len(
+        previous_pedestrian_keys) - 1]).strip("[]'").startswith("m")
+
+    av_driver.setCompositeAlpha(0)
+
+    av_driver.state(3)
+    av_driver.setParent(av)
+
+    driver_rootbone = av_driver.getBone('Bip01')
+    driver_head = av_driver.getBone('Bip01 Head')
+    driver_neck = av_driver.getBone('Bip01 Neck')
+    driver_upperarm_right = av_driver.getBone('Bip01 R UpperArm')
+    driver_upperarm_left = av_driver.getBone('Bip01 L UpperArm')
+    driver_forearm_right = av_driver.getBone('Bip01 R Forearm')
+    driver_forearm_left = av_driver.getBone('Bip01 L Forearm')
+    driver_hand_left = av_driver.getBone('Bip01 L Hand')
+    driver_hand_right = av_driver.getBone('Bip01 R Hand')
+    driver_thigh_right = av_driver.getBone('Bip01 R Thigh')
+    driver_thigh_left = av_driver.getBone('Bip01 L Thigh')
+    driver_calf_right = av_driver.getBone('Bip01 R Calf')
+    driver_calf_left = av_driver.getBone('Bip01 L Calf')
+
+    driver_rootbone.lock(recurse=1)
+    driver_head.unlock(recurse=1)
+
+    if isMale:
+        av_driver.setPosition(-.475, -.245, .43)
+        av_driver.setEuler(0, -15, 0)
+
+        driver_neck.setEuler(0, 0, 15, mode=viz.REL_LOCAL)
+
+        driver_upperarm_right.setEuler(0, 0, -82, mode=viz.REL_LOCAL)
+        driver_forearm_right.setEuler(-8, 8, 0, mode=viz.REL_LOCAL)
+        driver_hand_right.setEuler(0, 12, -11, mode=viz.REL_LOCAL)
+
+        driver_upperarm_left.setEuler(0, 0, -80, mode=viz.REL_LOCAL)
+        driver_forearm_left.setEuler(8, 0, -5, mode=viz.REL_LOCAL)
+        driver_hand_left.setEuler(0, -7, -9, mode=viz.REL_LOCAL)
+
+        driver_thigh_left.setEuler(15, 0, 80, mode=viz.REL_LOCAL)
+        driver_calf_left.setEuler(0, 0, -20, mode=viz.REL_LOCAL)
+
+        driver_thigh_right.setEuler(-15, 0, 80, mode=viz.REL_LOCAL)
+        driver_calf_right.setEuler(0, 0, -20, mode=viz.REL_LOCAL)
+    else:
+        av_driver.setPosition(-.475, -.245, .5)
+        av_driver.setEuler(0, -15, 0)
+
+        driver_neck.setEuler(0, 0, 15, mode=viz.REL_LOCAL)
+
+        driver_upperarm_right.setEuler(5, 0, -80, mode=viz.REL_LOCAL)
+        driver_forearm_right.setEuler(-5, 0, 0, mode=viz.REL_LOCAL)
+        driver_hand_right.setEuler(0, 9, -8, mode=viz.REL_LOCAL)
+
+        driver_upperarm_left.setEuler(10, 0, -80, mode=viz.REL_LOCAL)
+        driver_forearm_left.setEuler(5, 0, -5, mode=viz.REL_LOCAL)
+        driver_hand_left.setEuler(0, -4, -9, mode=viz.REL_LOCAL)
+
+        driver_thigh_left.setEuler(25, 0, 80, mode=viz.REL_LOCAL)
+        driver_calf_left.setEuler(0, 0, -20, mode=viz.REL_LOCAL)
+
+        driver_thigh_right.setEuler(-25, 0, 80, mode=viz.REL_LOCAL)
+        driver_calf_right.setEuler(0, 0, -20, mode=viz.REL_LOCAL)
+    #av_driver.visible(viz.ON)
+    vehicleDriverAdjustment(isMale)
+    print("[Driver]: Setup finished.")
+    return [av_driver, driver_head]
+
+
+def driverUnload(driver):
+    #driver.runAction(fadeOut) 
+    driver.clearActions()
+    driver.getBone('Bip01').unlock(recurse=1)
+    driver.setCompositeAlpha(0)
+    driver.setParent(viz.WORLD)
+
+
+propVehicle = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'AV', 'vehicles_misc', 'rouge.osgb')), parent=viz.WORLD)
+propVehicle.setPosition(0, 50, 0)
+propVehicle.visible(viz.OFF)
+pvTires = {}
+
+eHMI = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'AV', 'eHMI', 'eHMI_Update_.osgb')), parent=av)
+
+screen = vizshape.addPlane((1.08, .67))
+screen.setEuler(0, 90, 0, viz.ABSOLUTE)
+screen.setEuler(180, 0, 0, viz.ABS_LOCAL)
+screen.setPosition(0, 0, 0.07)
+screen.setParent(eHMI)
+screen.color(0, 0, 0)
+screen.disable(viz.LIGHTING)
+screen.appearance(viz.TEXREPLACE)
+
+eHMI.setPosition(0, .6, 2.68, mode=viz.REL_PARENT)
+eHMI.setCompositeAlpha(0)
+
+# Import video, add to eHMI
+eHMI_sectionedCircle = viz.addVideo(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'AV', 'eHMI', 'animations', 'sectionedCircle.mp4')))
+av.setPosition(0, -40, 0)
+
+eHMI_animation_array = []
+
+
+def eHMIanimation(eHMI_, endPosition_):
+    clip_duration = eHMI_.getDuration()
+
+    i = 0
+    if hasattr(av.getActionInstance(), 'speed'):
+        start_speed = av.getActionInstance().speed
+        current_speed = start_speed
+        while current_speed > .15:
+            if hasattr(av.getActionInstance(), 'speed'):
+                current_speed = av.getActionInstance().speed
+            else:
+                break
+            if len(eHMI_animation_array) > i:
+                eHMI_.setTime(eHMI_animation_array[i])
+            else:
+                time_to_set = custom.interpolate(
+                    1.25, start_speed,
+                    clip_duration, 0,
+                    current_speed
+                )
+                eHMI_animation_array.append(time_to_set)
+                eHMI_.setTime(time_to_set)
+            i += 1
+            yield viztask.waitFrame(3)
+
+    else:
+        distance = numpy.linalg.norm(numpy.array(
+            av.getPosition()) - numpy.array(endPosition_))
+        while distance > 0:
+            distance = numpy.linalg.norm(numpy.array(
+                av.getPosition()) - numpy.array(endPosition_))
+            if len(eHMI_animation_array) > i:
+                eHMI_.setTime(eHMI_animation_array[i])
+            else:
+                time_to_set = custom.interpolate(
+                    1.25, ssdDistance,
+                    clip_duration, 0,
+                    distance
+                )
+                eHMI_animation_array.append(time_to_set)
+                eHMI_.setTime(time_to_set)
+            i += 1
+            yield viztask.waitFrame(3)
+            if distance < .01:
+                break
+    eHMI_.setTime(clip_duration)
+    return
+
+
+# eHMI.enable(viz.LIGHTING)
+
+
+# Car Movement Setup  ----------------------------------------
+# Set start and end position
+startPosition_LocalRoad = [-105, 0, -8.25]
+start_position_midblock = [2.2, 0, 90.25]
+
+crossing_midblock = [2.2, 0, 3.5]
+crossing_LocalRoad = [-2, 0, -8.25]
+
+# Vehicle braking/trial signal variables
+signalDistance = 50
+ssdDistance = 43.1
+beginBrakingDistance = 29.50464
+braking = False
+
+end_position_local_road = [crossing_LocalRoad[0] -
+                           1.5192, 0, crossing_LocalRoad[2]]
+end_position_midblock = [crossing_midblock[0], 0, crossing_midblock[2] + 1.5192]
+
+brakingRate = 3.048  # Convert to meters
+
+# Create movement actions. These are custom and contained in custom.py.
+# The default argument values are those described in the experimental design powerpoint
+
+moveToCrossingLocalRoad = custom.brake(pos=end_position_local_road,
+                                       begin=startPosition_LocalRoad,
+                                       along="x+")
+
+moveToCrossingMidblock = custom.brake(pos=end_position_midblock,
+                                      begin=start_position_midblock,
+                                      along="z-")
+
+moveThroughCrossingMidblock = custom.moveTo(
+    [moveToCrossingMidblock.pos[0], 0, -90], begin=start_position_midblock, speed=13.4112)
+moveThroughFarLaneMidblock = custom.moveTo(
+    [7.2, 0, 90], begin=[7.2, 0, -100], speed=13.4112)
+accelerateThroughCrossingMidblock = custom.accelToPos(
+    [moveToCrossingMidblock.pos[0], 0, -100], vel=13.4112)
+moveThroughCrossingLocalRoad = custom.moveTo(
+    [105, 0, -8.25], begin=startPosition_LocalRoad, speed=13.4112)
+accelerateThroughCrossingLocalRoad = custom.accelToPos(
+    [105, 0, -8.25], vel=13.4112)
+
+# Car animation and sound  ----------------------------------------
+front_wheels = vizfx.addChild(os.path.realpath(
+    os.path.join(os.getcwd(), 'Assets', 'AV', 'tesla_wheels.osgb')))
+back_wheels = av.getChild('wheels_back')
+back_wheels.setCenter(back_wheels.getBoundingBox().center)
+
+right_front = front_wheels.getChild('wheel_rightfront')
+right_front.setCenter(right_front.getBoundingBox().center)
+left_front = front_wheels.getChild('wheel_leftfront')
+left_front.setCenter(left_front.getBoundingBox().center)
+
+left_wheel_dummy = front_wheels.getChild('wheel_leftfront_dummy')
+left_wheel_dummy.setCenter(left_wheel_dummy.getBoundingBox().center)
+right_wheel_dummy = front_wheels.getChild('wheel_rightfront_dummy')
+right_wheel_dummy.setCenter(right_wheel_dummy.getBoundingBox().center)
+front_wheels.setParent(av)
+
+front_wheels.setPosition(0, .81, 0, mode=viz.REL_GLOBAL)
+max_rotation_speed = 1200
+
+spinTiresBrake = custom.tireSpin(1, 0, 0, max_rotation_speed, av, "brake")
+spinTiresBrakeBack = custom.tireSpin(1, 0, 0, max_rotation_speed, av, "brake")
+spinTiresAccel = custom.tireSpin(1, 0, 0, max_rotation_speed, av, "accel")
+spinTiresAccelBack = custom.tireSpin(1, 0, 0, max_rotation_speed, av, "accel")
+
+
+av_components = [av, eHMI, screen, left_front, right_front, back_wheels]
+
+
+def tireMovement(act):
+    if act == "brake":
+        left_front.runAction(spinTiresBrake)
+        yield viztask.waitTime(.2)
+        right_front.runAction(spinTiresBrake)
+        yield viztask.waitTime(.2)
+        back_wheels.runAction(spinTiresBrake)
+    elif act == "accel":
+        left_front.runAction(spinTiresAccel)
+        yield viztask.waitTime(.2)
+        right_front.runAction(spinTiresAccel)
+        yield viztask.waitTime(.2)
+        back_wheels.runAction(spinTiresAccel)
+    elif act == "stop":
+        left_front.endAction()
+        right_front.endAction()
+        back_wheels.endAction()
+
+
+# Lighting  ----------------------------------------
+left_blinker = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'AV', 'av_leftturn.osgb')), parent=av)
+left_blinker.visible(viz.OFF)
+blinkAction = custom.signalTurn(.5)
+brake_lights = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'AV', 'av_brakes.osgb')), parent=av)
+brake_lights.visible(viz.OFF)
+
+# Sound effects  ----------------------------------------
+# Plays prior to braking
+driving = av.playsound(os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'drivingsound_loud.wav')),
+                       flag=viz.PAUSE)
+# Plays once braking
+approach = av.playsound(os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'onapproach.wav')),
+                        flag=viz.PAUSE)
+# Plays when stopped
+# idle = av.playsound(os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'engineidle.wav')),
+# 					flag = viz.PAUSE)
+
+# Plays when car begins to move again
+acceleration = av.playsound(os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'acceleration.wav')),
+                            flag=viz.PAUSE)
+
+# Plays to signal start of trial window
+
+signal_trial_sound = viz.addAudio(
+    os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'begintrial.wav')),
+    flag=viz.PAUSE)
+signal_end_sound = viz.addAudio(os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'endtrial.wav')),
+                                flag=viz.PAUSE)
+signal_block_sound = viz.addAudio(os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'endblock.wav')),
+                                  flag=viz.PAUSE)
+signal_experiment_sound = viz.addAudio(
+    os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'endexperiment.wav')),
+    flag=viz.PAUSE)
+signal_practice_sound = viz.addAudio(
+    os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'practiceEnd.wav')),
+    flag=viz.PAUSE)
+ambience = viz.addAudio(os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'suburbanambience.wav')),
+                        flag=viz.PAUSE)
+
+ambience.volume(.2)
+
+# Proximity system set-up ----------------------------------------
+
+# Add manager, set participant as target.
+
+localRoadManager = vizproximity.Manager()
+midblockManager = vizproximity.Manager()
+participantTarget = vizproximity.Target(participant)
+vehicleTarget = vizproximity.Target(av)
+
+# Local Road Sensors
+
+localRoadSensorStart = vizproximity.Sensor(vizproximity.Box(
+    [2.75, 3, 2.5], center=[4.45, 1, 0]), source=localRoadEnvironment)
+localRoadSensorStreet = vizproximity.Sensor(vizproximity.Box(
+    [6.05, 3, 8], center=[-.07, 1, 0]), source=localRoadEnvironment)
+localRoadSensorEnd = vizproximity.Sensor(vizproximity.Box(
+    [2, 3, 3.5], center=[-1.2, 1, 0]), source=localRoadEnvironment)
+
+# Midblock Sensors
+
+midblockSensorStart = vizproximity.Sensor(vizproximity.Box(
+    [2.4, 3, 3], center=[-3.8, 1, 0]), source=midblockCrossingEnvironment)
+midblockSensorEnd = vizproximity.Sensor(vizproximity.Box(
+    [1.95, 3, 8], center=[3.2, 1, 0]), source=midblockCrossingEnvironment)
+midblockSensorStreet = vizproximity.Sensor(vizproximity.Box(
+    [4.3, 3, 3.5], center=[0, 1, 0]), source=midblockCrossingEnvironment)
+
+# Proximity Managers
+
+localRoadManager.addTarget(participantTarget)
+localRoadManager.addTarget(vehicleTarget)
+midblockManager.addTarget(participantTarget)
+midblockManager.addTarget(vehicleTarget)
+
+if not debug:
+    localRoadManager.addSensor(localRoadSensorStart)
+    localRoadManager.addSensor(localRoadSensorEnd)
+    localRoadManager.addSensor(localRoadSensorStreet)
+    midblockManager.addSensor(midblockSensorStart)
+    midblockManager.addSensor(midblockSensorEnd)
+    midblockManager.addSensor(midblockSensorStreet)
+
+
+def ToggleSensors(env):
+    if env == "LocalRoad":
+        for sensor in midblockManager.getSensors():
+            midblockManager.removeSensor(sensor)
+        localRoadManager.addSensor(localRoadSensorStart)
+        localRoadManager.addSensor(localRoadSensorEnd)
+        localRoadManager.addSensor(localRoadSensorStreet)
+        if debug:
+            localRoadManager.setDebug(viz.ON)
+
+    elif env == "Midblock":
+        for sensor in localRoadManager.getSensors():
+            localRoadManager.removeSensor(sensor)
+        midblockManager.addSensor(midblockSensorStart)
+        midblockManager.addSensor(midblockSensorEnd)
+        midblockManager.addSensor(midblockSensorStreet)
+        if debug:
+            midblockManager.setDebug(viz.ON)
+
+
+practiceTrialObjects = [propVehicle]
+# Highlight boxes for practice trials.
+highlightBoxLocalRoad = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'Objects', 'vizard_osgb', 'highlightbox.osgb')))
+highlightBoxLocalRoad.setScale(1.25, 3, 2.5)
+highlightBoxLocalRoad.setPosition(4.45, 1, 0)
+highlightBoxLocalRoad.visible(viz.OFF)
+practiceTrialObjects.append(highlightBoxLocalRoad)
+
+highlightBoxMidblock = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'Objects', 'vizard_osgb', 'highlightbox.osgb')))
+highlightBoxMidblock.setScale(.5, 2, 3)
+highlightBoxMidblock.setPosition(-3.2, 1, 0)
+highlightBoxMidblock.visible(viz.OFF)
+practiceTrialObjects.append(highlightBoxMidblock)
+
+warningBox = vizfx.addChild(os.path.realpath(os.path.join(
+    os.getcwd(), 'Assets', 'Objects', 'vizard_osgb', 'warningBox.osgb')))
+warningBox.visible(viz.OFF)
+practiceTrialObjects.append(warningBox)
+
+
+# Practice trial instruction text`
+def createInstructionText(text, pos, parent=None):
+    if (not practiceTrials): return None
+    if parent is not None:
+        t = viz.addText(text, pos=pos, parent=parent)
+    else:
+        t = viz.addText(text, pos=pos)
+
+    t.setScale(.1, .1, .1)
+    t.resolution(1)
+    t.setBackdrop(viz.BACKDROP_OUTLINE)
+    t.alignment(viz.ALIGN_CENTER_CENTER)
+    t.fontSize(3)
+    t.drawOrder(0)
+    t.runAction(custom.turnToFace(viz.MainView))
+    t.visible(viz.OFF)
+    practiceTrialObjects.append(t)
+    return t
+
+
+StartText = createInstructionText("Return here", pos=[3.45, 1.25, 0])
+
+WaitText = createInstructionText("Wait for signal", pos=[0, 1.3, 0])
+
+moveToText = createInstructionText(
+    "Walk here", highlightBoxLocalRoad.getPosition())
+
+EndOfTrialText = createInstructionText("Please return", pos=[-4.5, 1.5, 0])
+
+
+def unloadPracticeTrialObjects(trial_object_array):
+    for trial_object in trial_object_array:
+        trial_object.remove()
+
+
+# Data Handling -----------------------------------------------------------------------------
+# Dependent variable set-up ----------
+print(av_fixationregions.getNodeNames(flags=viz.TYPE_GROUP))
+
+filt = re.compile("_g$")
+for i in propVehicle.getNodeNames(flags=viz.TYPE_GROUP):
+    group = re.search(filt, i)
+    if group is not None:
+        center = propVehicle.getChild(i).getBoundingBox().center
+        propVehicle.getChild(i).setCenter(center)
+        pvTires[i] = propVehicle.getChild(i)
+
+
+def toggleFixationRegions(environment):
+    if environment == "LocalRoad":
+        midblockCrossingFixations.setPosition(0, 100, 0)
+        localRoadFixations.setPosition(0, 0, 0)
+    elif environment == "Midblock":
+        midblockCrossingFixations.setPosition(0, 0, 0)
+        localRoadFixations.setPosition(0, 100, 0)
+    elif environment == "practice":
+        midblockCrossingFixations.setPosition(0, 100, 0)
+        localRoadFixations.setPosition(0, 100, 0)
+
+
+def movePropVehicle():
+    propVehicle.visible(viz.ON)
+    yield viztask.runAction(propVehicle, fadeIn)
+    if localRoadEnvironment.getVisible():
+        propVehicle.setEuler(270, 0, 0)
+        propVehicle.addAction(moveThroughCrossingLocalRoad)
+        for tire in pvTires.values():
+            tire.runAction(vizact.spin(1, 0, 0, 9000))
+    elif midblockCrossingEnvironment.getVisible():
+        propVehicle.setEuler(180, 0, 0)
+        propVehicle.addAction(moveThroughFarLaneMidblock)
+    propdrive = propVehicle.playsound(
+        os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'drivingsound_loud.wav')),
+        flag=viz.LOOP)
+    yield viztask.waitTime(1)
+    yield viztask.waitTrue(
+        lambda: propVehicle.getActionInstance().elapsed / propVehicle.getActionInstance().duration >= .90)
+    propdrive.stop()
+    yield viztask.runAction(propVehicle, fadeOut)
+    propVehicle.visible(viz.OFF)
+
+
+# Turns true after av begins braking
+braking = False
+
+# Turns true after car stops
+carStopped = False
+
+# Indicator of whether an eHMI was present in the condition or not
+interface = True
+
+participantEnteredRoadway = False
+
+# Turns true after participant has completed their part in the trial
+participantCrossed = False
+
+# Update and save participants' trial summary data
+behavioralData = []
+
+trialSignaled = False
+nonYield = False
+afterNonYielding = False
+
+
+def getPhase():
+    global trialSignaled, braking, nonYield, carStopped
+    if trialSignaled is False:
+        return "pre-signal"
+    elif trialSignaled is True and braking is False and carStopped is False and nonYield is False:
+        return "pre-braking"
+    elif trialSignaled is True and braking is False and nonYield is True:
+        return "non-yield approaching"
+    elif trialSignaled is True and braking is True:
+        return "braking"
+    elif trialSignaled is True and carStopped is True and nonYield is False:
+        return "stopped"
+    elif trialSignaled is True and carStopped is True and nonYield is True:
+        return "non-yield passed"
+    else:
+        return "unknown"
+
+
+def resetPhase():
+    global trialSignaled, braking, nonYield, carStopped
+    trialSignaled = False
+    braking = False
+    nonYield = False
+    carStopped = False
+
+
+def getParticipantLocation():
+    localRoadSensors = localRoadManager.getSensorsContainingTarget(
+        participantTarget)
+    midblockSensors = midblockManager.getSensorsContainingTarget(
+        participantTarget)
+
+    if localRoadSensorStart in localRoadSensors or midblockSensorStart in midblockSensors:
+        return "Start"
+    elif localRoadSensorStreet in localRoadSensors or midblockSensorStreet in midblockSensors:
+        return "Crossing"
+    elif localRoadSensorEnd in localRoadSensors or midblockSensorEnd in midblockSensors:
+        return "End"
+    else:
+        return "NA"
+
+# Records the current values of the arguments into a dict to be saved to csv.
+def updateData(pid, env, condition, triallength, entercrosswalktime, vehicleatenter, vehiclefinishtime,
+               enterbeforevehiclefinish, afternonyielding, ped_data, interpersonaldistance):
+    global behavioralData, signalTime
+    if ped_data is not None:
+        driver_data = (str(ped_data[len(ped_data) - 1])).strip("[]'")
+    if condition[1] >= 1:
+        ped_one = (str(ped_data[0])).strip("[]'")
+        if condition[1] == 2:
+            ped_two = (str(ped_data[1])).strip("[]'")
+        else:
+            ped_two = "NA"
+    else:
+        ped_one = "NA"
+        ped_two = "NA"
+
+    sample = {
+        "participant": pid,
+        "environment": env,
+        "block": blockNum,
+        "trial": trialNum,
+        "order": order,
+        "condition": condition[0],
+        "num_peds": condition[1],
+        "aggression": condition[2],
+        "ped_one": ped_one,
+        "ped_two": ped_two,
+        "interpersonal distance": interpersonaldistance,
+        "driver": driver_data,
+        "triallength": triallength,
+        "signaltime": (signalTime - trialBeginTime).total_seconds(),
+        "entercrosswalktime": entercrosswalktime,
+        "vehicleatenter": vehicleatenter,
+        "vehiclefinishtime": vehiclefinishtime,
+        "enterbeforevehiclefinish": enterbeforevehiclefinish,
+        "afternonyield": afternonyielding
+    }
+    behavioralData.append(sample)
+
+
+def saveData(participant_id):
+    global behavioralData
+    if not os.path.exists('data/behavioral/{p}/'.format(p=participant_id)):
+        os.makedirs('data/behavioral/{p}/'.format(p=participant_id))
+    file_name = 'data/behavioral/{p}/data_{block}_{trial}.csv'.format(
+        p=participant_id, trial = trialNum, block=blockNum)
+    fh.save_data_threaded(behavioralData, file_name)
+    behavioralData = []
+
+
+# Experimental Trial Execution --------------------------------------------------------------------
+
+
+# Vehicle Left Turn
+
+# Animation path and control point specification- the position and orientation the vehicle takes at different points in the turn.
+# The first argument is the timepoint, and the subsequent arguments are position and orientation.
+moveThroughLocalRoad = viz.addAnimationPath()
+moveThroughLocalRoad.addControlPoint(
+    0, pos=startPosition_LocalRoad, euler=[90, 0, 0])
+moveThroughLocalRoad.addControlPoint(
+    7.5, pos=end_position_local_road, euler=[90, 0, 0])
+moveThroughLocalRoad.addControlPoint(
+    7.7, pos=crossing_LocalRoad, euler=[85, 0, 0])
+moveThroughLocalRoad.addControlPoint(
+    7.9, pos=[-.5, 0, -8.25], euler=[80, 0, 0])
+moveThroughLocalRoad.addControlPoint(8.9, pos=[1.25, 0, -5], euler=[20, 0, 0])
+moveThroughLocalRoad.addControlPoint(9.4, pos=[1.25, 0, 0], euler=[0, 0, 0])
+moveThroughLocalRoad.addControlPoint(13, pos=[1.25, 0, 39], euler=[0, 0, 0])
+moveThroughLocalRoad.addEventAtControlPoint('begin turn', 1)
+
+turnFromStopLocalRoad = viz.addAnimationPath()
+
+turnFrom = viz.addControlPoint(pos=[0, 0, 0], euler=[90, 0, 0])
+turnFromStopLocalRoad.addControlPoint(
+    1.3, pos=[-.5, 0, -8.25], euler=[80, 0, 0])
+turnFromStopLocalRoad.addControlPoint(2.8, pos=[1.5, 0, -5], euler=[20, 0, 0])
+turnFromStopLocalRoad.addControlPoint(3.3, pos=[1.5, 0, 0], euler=[0, 0, 0])
+turnFromStopLocalRoad.addControlPoint(10, pos=[1.5, 0, 55], euler=[0, 0, 0])
+
+moveThroughLocalRoadTires = viz.addAnimationPath()
+moveThroughLocalRoadTires.addControlPoint(0, euler=[0, 0, 0])
+moveThroughLocalRoadTires.addControlPoint(.4, euler=[-15, 0, 0])
+moveThroughLocalRoadTires.addControlPoint(1.4, euler=[-50, 0, 0])
+moveThroughLocalRoadTires.addControlPoint(2, euler=[-20, 0, 0])
+moveThroughLocalRoadTires.addControlPoint(2.5, euler=[0, 0, 0])
+
+accelerateLeftTurnThroughLocalRoadTires = viz.addAnimationPath()
+accelerateLeftTurnThroughLocalRoadTires.addControlPoint(0, euler=[0, 0, 0])
+accelerateLeftTurnThroughLocalRoadTires.addControlPoint(1, euler=[-15, 0, 0])
+accelerateLeftTurnThroughLocalRoadTires.addControlPoint(2.5, euler=[-50, 0, 0])
+accelerateLeftTurnThroughLocalRoadTires.addControlPoint(3, euler=[-20, 0, 0])
+accelerateLeftTurnThroughLocalRoadTires.addControlPoint(3.5, euler=[0, 0, 0])
+
+moveThroughLocalRoad.setRotateMode(viz.LINEAR)
+accelerateLeftTurnThroughLocalRoadTires.setRotateMode(viz.LINEAR)
+moveThroughLocalRoad.setTranslateMode(viz.LINEAR)
+turnFromStopLocalRoad.setTranslateMode(viz.LINEAR)
+
+
+def leftTurnTires():
+    lt = viz.link(accelerateLeftTurnThroughLocalRoadTires, left_wheel_dummy)
+    rt = viz.link(accelerateLeftTurnThroughLocalRoadTires, right_wheel_dummy)
+
+    yield accelerateLeftTurnThroughLocalRoadTires.play()
+    yield viztask.waitTime(4)
+    accelerateLeftTurnThroughLocalRoadTires.pause()
+    lt.remove()
+    rt.remove()
+    accelerateLeftTurnThroughLocalRoadTires.reset()
+    return
+
+# This handles the left turn animation.
+def leftTurn(eHMI_):
+    # Make sure the relevant animations are reset before starting the turn.
+    moveThroughLocalRoad.reset()
+    moveThroughLocalRoadTires.reset()
+    turnFromStopLocalRoad.reset()
+    # Begin the tirespin actions for all tires.
+    # The yield statements ensure that the tire animations occur in a fixed sequence
+    left_front.addAction(custom.tireSpin(1, 0, 0, 1920, av, "brake"))
+    yield viztask.waitTime(.2)
+    right_front.addAction(custom.tireSpin(1, 0, 0, 1920, av, "brake"))
+    yield viztask.waitTime(.2)
+    back_wheels.addAction(custom.tireSpin(1, 0, 0, 1920, av, "brake"))
+    yield viztask.waitTime(.2)
+    if eHMI_ == "Blank Interface No Stop":
+        # To animate things, you need to link them to an object.
+        l = viz.link(moveThroughLocalRoad, av)
+        # The "wheel dummies" are parented to the tires, and are used to rotate the tires during the turn
+        # while they still spin.
+        lt = viz.link(moveThroughLocalRoadTires, left_wheel_dummy)
+        rt = viz.link(moveThroughLocalRoadTires, right_wheel_dummy)
+        moveThroughLocalRoad.play()
+        # Begin playing the "movethrough" animation at a specific distance.
+        # viztask.waitTrue() requires that you use a "lambda" function that returns a boolean value.
+        yield viztask.waitTrue(lambda: vehicleDistanceAssessment("localroad", [-.5, 0, -8.25], 10.5))
+        moveThroughLocalRoadTires.play()
+        driving.stop()
+        acceleration.play()
+        yield viztask.waitTime(3)
+        left_blinker.endAction()
+        left_blinker.visible(viz.OFF)
+        yield viztask.waitTime(moveThroughLocalRoad.getDuration())
+
+        moveThroughLocalRoad.pause()
+        moveThroughLocalRoadTires.pause()
+        lt.remove()
+        rt.remove()
+        l.remove()
+        moveThroughLocalRoadTires.reset()
+        moveThroughLocalRoad.reset()
+    else:
+        l = viz.link(turnFromStopLocalRoad, av)
+        turnFromStopLocalRoad.setRotateMode(viz.LINEAR)
+        turnFromStopLocalRoad.play()
+        viztask.schedule(leftTurnTires())
+        yield viztask.waitTime(turnFromStopLocalRoad.getDuration() + 1)
+        l.remove()
+        turnFromStopLocalRoad.pause()
+        turnFromStopLocalRoad.reset()
+        turnFromStopLocalRoad.removeControlPoint(0, remove=False)
+    return
+
+# ==============================================================================
+# Virtual Pedestrians ----------------------------------------------------------
+# ==============================================================================
+# Objects and functions pertaining to the virtual pedestrians for the revised
+# study.
+# ==============================================================================
+
+# Import virtual pedestrians to a dict, with the key being the avatar number
+# that fits the path to the avatar ("m001", etc.). Use a dict to store the avatars
+# so they can be concisely loaded at once while allowing 1-3 to be active each trial.
+def loadAvatars():
+    pedestrians = {}
+    for sex in ["m", "f"]:
+        for num in range(1, 21):
+            if num < 10:
+                num = "0{}".format(num)
+            path = os.path.realpath(os.path.join(os.getcwd(
+            ), 'Assets', 'Avatars', 'rocketbox', 'CC2_{}0{}_hipoly_A0.cfg'.format(sex, num)))
+            path_fixations = os.path.realpath(os.path.join(os.getcwd(
+            ), 'Assets', 'Avatars', '{}_avatar_fixation_boxes.osgb'.format(sex)))
+            pedestrians["{}0{}".format(sex, num)] = vizfx.addAvatar(path)
+            
+            pedestrians["{}0{}".format(sex, num)].setCompositeAlpha(0)
+    return pedestrians
+
+
+pedestrian_container = []
+active_pedestrians = []
+
+# Import fixation regions, two for each sex of avatar. All female avatars share the same
+# dimensions, while males have a different set. We need two because there are up to two
+# pedestrians in the scene at once, and both may be female or male.
+active_pedestrian_fixation_f = vizfx.addChild(os.path.realpath(os.path.join(os.getcwd(
+            ), 'Assets', 'Avatars', 'f_avatar_fixation_boxes.osgb')), parent=viz.WORLD)
+active_pedestrian_fixation_m = vizfx.addChild(os.path.realpath(os.path.join(os.getcwd(
+            ), 'Assets', 'Avatars', 'm_avatar_fixation_boxes.osgb')), parent=viz.WORLD)
+active_pedestrian_fixation_f_two = vizfx.addChild(os.path.realpath(os.path.join(os.getcwd(
+            ), 'Assets', 'Avatars', 'f_avatar_fixation_boxes_two.osgb')), parent=viz.WORLD)
+active_pedestrian_fixation_m_two = vizfx.addChild(os.path.realpath(os.path.join(os.getcwd(
+            ), 'Assets', 'Avatars', 'm_avatar_fixation_boxes_two.osgb')), parent=viz.WORLD)
+
+pedestrian_one = None
+pedestrian_two = None
+previous_pedestrian_keys = []
+
+
+# Randomizes the avatars used in a particular trial
+def randomizeAvatars(num):
+    global active_pedestrians, pedestrian_container, previous_pedestrian_keys
+    data = []
+    previous_keys = []
+    # Ensure unused fixation regions are hidden
+    active_pedestrian_fixation_f.visible(viz.OFF)
+    active_pedestrian_fixation_m.visible(viz.OFF)
+    active_pedestrian_fixation_f_two.visible(viz.OFF)
+    active_pedestrian_fixation_m_two.visible(viz.OFF)
+    
+    # Pop the previous pedestrians from the scene, adding them back to the container dict.
+    while len(active_pedestrians) > 0:
+        
+        previous_keys.append(str(previous_pedestrian_keys.pop()).strip("[]'"))
+        pedestrian_container[previous_keys[len(previous_keys) - 1]] = active_pedestrians.pop()
+
+    # Randomly choose a key and use it to access the avatar, popping it from the unused avatar dict to the
+    # active avatar list.
+    for i in range(num):
+        pedestrian_key = None
+        while pedestrian_key is None or pedestrian_key in previous_keys or pedestrian_key is avatarNum:
+            pedestrian_key = random.choice(list(pedestrian_container.keys()))
+        print("Pedestrian {}: {}".format(i, pedestrian_key))
+        data.append([pedestrian_key])
+        active_pedestrians.append(pedestrian_container.pop(pedestrian_key))
+        
+        # Parent the fixation regions to the active avatars
+        if i == 0:
+            if "f" in pedestrian_key:
+                active_pedestrian_fixation_f.setParent(active_pedestrians[i])
+                active_pedestrian_fixation_f.visible(viz.ON)
+            else:
+                active_pedestrian_fixation_m.setParent(active_pedestrians[i])
+                active_pedestrian_fixation_m.visible(viz.ON)
+        if i == 0:
+            if "f" in pedestrian_key:
+                active_pedestrian_fixation_f_two.setParent(active_pedestrians[i])
+                active_pedestrian_fixation_f_two.visible(viz.ON)
+            else:
+                active_pedestrian_fixation_m_two.setParent(active_pedestrians[i])
+                active_pedestrian_fixation_m_two.visible(viz.ON)
+
+        # Set alpha to 0 for the active avatars so they fade in on appearance.
+        active_pedestrians[i].setCompositeAlpha(0)
+        # Ensure their action pool is cleared
+        if (active_pedestrians[i].getAction() is not None):
+            active_pedestrians[i].clearActions()
+
+    previous_pedestrian_keys = data.copy()
+
+    return data
+
+
+
+### Animation landmarks. These are the points at which the pedestrians will stop or appear.
+
+# Appearance
+pedestrianAppearanceLocations = {
+    'localroad': [5.8, 0.12, -6],
+    'midblock': [-3.4, .12, 6]
+}
+
+# Where the pedestrians will stop before the trial
+pedestrianStartLandmarks = {
+    'localroad': [[5.2, 0.12, -2.8],
+                  [3.7, 0.12, -1.2]],
+    'midblock': [[-3.4, 0.12, 1.3],
+                 [-1.5, 0.12, 1]]
+}
+
+# Offsets used to keep pedestrians from overlapping
+pedestrianStartOffsets = {
+    'localroad': [.6, 0, .3],
+    'midblock': [.8, 0, .3]
+}
+
+# The direction the pedestrians will face when they appear
+pedestrianAppearanceOrientations = {
+    'localroad': 0,
+    'midblock': 180
+}
+
+# CrossingLandmarks: Where the pedestrians move after crossing the road. Generally, they move to the first house in the direction specified by the dict.
+pedestrianCrossingLandmarks = {
+    'localroad': {'straight': [[-2.43194, 0.12, -.8],
+                               [-5, 0.15240, 0],
+                               [-27.22623, 0.12, 0],
+                               [-27.31457, 0.12, 3.57636],
+                               [-27.00, 0.12, 4.18794]],
+                  'straight_two': [[-2.43194, 0.12, -.8],
+                                   [-5, 0.12, 0],
+                                   [-69.66394, 0.12, 0],
+                                   [-69.31457, 0.12, 3.57636],
+                                   [-69.00, 0.12, 4.18794]],
+                  'right': [[-5.11002, 0.12, -.8],
+                            [-5.50278, 0.12, 23.09359],
+                            [-13.57543, 0.12, 22.82482]],
+                  'right_two': [[-5.11002, 0.12, -.8],
+                                [-5.11, 0.12, 59.66],
+                                [-13.57543, 0.12, 59.66]]
+                  },
+    'midblock': {'straight': [[25, 0.12, 1],
+                              [25, 0.12, 10.14521]],
+                 'right': [[10.88, 0.12, 1],
+                           [10.88, 0.12, -18.86],
+                           [19.72400, 0.12, -18.86],
+                           [21.72400, 0.12, -18.86]],
+                 'right_two': [[10.88, 0.12, 1],
+                               [10.88, 0.12, -68.86],
+                               [19.72400, 0.12, -68.86],
+                               [21.72400, 0.12, -68.86]],
+                 'left': [[10.88, 0.12, 1],
+                          [10.85631, 0.12, 42],
+                          [19.67786, 0.12, 42],
+                          [21.72400, 0.12, 42]],
+                 'left_two': [[10.88, 0.12, 1],
+                              [10.88, 0.15240, 42],
+                              [19.67786, 0.12, 42],
+                              [21.72400, 0.12, 42]]}
+}
+
+
+
+
+# Plays the "footstep" sound when the pedestrians' animation reaches the frame where the foot contacts the ground.
+# The frames of the animation can be checked in Vizard Inspector.
+def pedestrianFootsteps(pedestrian):
+    global pedestrians_active
+    footstep = pedestrian.playsound(
+        os.path.realpath(os.path.join(os.getcwd(), 'Assets', 'AV', 'Audio', 'footstep.wav')),
+        flag=viz.PAUSE)
+        
+    while pedestrians_active:
+        while pedestrian.getCycleRunning(5):
+
+            yield viztask.waitTrue(lambda: pedestrian.getAnimationTime(0) >= .3 or pedestrian.getCycleRunning(1))
+            if pedestrian.getCycleRunning(1):
+                break
+            footstep.play()
+
+            yield viztask.waitTrue(lambda: pedestrian.getAnimationTime(0) >= .9 or pedestrian.getCycleRunning(1))
+            if pedestrian.getCycleRunning(1):
+                break
+            footstep.play()
+
+            yield viztask.waitTrue(lambda: pedestrian.getAnimationTime(0) <= .3 or pedestrian.getCycleRunning(1))
+            if pedestrian.getCycleRunning(1):
+                break
+
+        yield viztask.waitTime(0.1)
+
+
+# Turns the active pedestrians' heads at the start of a trial,
+# with the angles depending on the environment.
+def pedestrianGazeFollowCar(num, environment):
+    global virtualPedsCrossing, gazeRoutineFinished, carStopped
+    gazeRoutineFinished = False
+
+    avatar = active_pedestrians[0] if num == 1 else active_pedestrians[1] if num == 2 else None
+    head = avatar.getBone('Bip01 Head')
+
+    # The angle which would turn the pedestrians' head toward the vehicle.
+    if environment == "localroad" and num == 1:
+        av_angle = -45
+    elif environment == "localroad" and num == 2:
+        av_angle = -25
+    elif environment == "midblock" and num == 1:
+        av_angle = -75
+    elif environment == "midblock" and num == 2:
+        av_angle = -45
+    else:
+        av_angle = None
+
+    # Bones must be locked prior to manual animation.
+    yield head.lock()
+    
+    # Sequence of actions turns the head right and left, stopping at the angle of the vehicle (hardcoded).
+    yield viztask.addAction(
+        avatar,
+        vizact.sequence(
+            vizact.headto(
+                45,
+                0,
+                0,
+                bone='Bip01 Head',
+                speed=120
+            ),
+            vizact.waittime(vizact.randfloat(0.1, 0.3)),
+            vizact.headto(
+                -45,
+                0,
+                0,
+                bone='Bip01 Head',
+                speed=120
+            ),
+            vizact.waittime(vizact.randfloat(0.1, 0.3)),
+            vizact.headto(
+                av_angle - head.getEuler()[0],
+                0,
+                0,
+                bone='Bip01 Head',
+                speed=120
+            )
+        )
+    )
+    yield viztask.waitTrue(lambda: virtualPedsCrossing)
+    print("[Peds]: Ped {} gaze turning to crosswalk.".format(num))
+    yield viztask.runAction(
+        avatar,
+        vizact.headto(
+            -head.getEuler()[0],
+            0,
+            0,
+            bone='Bip01 Head',
+            speed=120
+        )
+    )
+    # Make sure to unlock bones after animation is finished
+    yield head.unlock()
+    gazeRoutineFinished = True
+
+# Calculates the distance the participant is standing from the virtual pedestrians, updating "interpersonal_distance" to the smallest value recorded every .1 seconds
+def pedestrianInterPersonalDistance(num):
+    global interpersonal_distance
+    interpersonal_distance = None
+    if num == 0:
+        return 0
+    yield viztask.waitTrue(lambda: eyetracking.trialUnderway)
+    while eyetracking.trialUnderway:
+        participantPosition = participant.getPosition()
+        if num >= 1:
+            pedestrian_one_position = active_pedestrians[0].getPosition()
+            ped_one = custom.getDistance(
+                [
+                    pedestrian_one_position[0],
+                    0,
+                    pedestrian_one_position[2]
+                ],
+                [
+                    participantPosition[0],
+                    0,
+                    participantPosition[2]
+                ])
+        if num == 2:
+            pedestrian_two_position = active_pedestrians[1].getPosition()
+            ped_two = custom.getDistance(
+                [
+                    pedestrian_two_position[0],
+                    0,
+                    pedestrian_two_position[2]
+                ],
+                [
+                    participantPosition[0],
+                    0,
+                    participantPosition[2]
+                ])
+            tempinterpersonaldistance = ped_one if ped_one < ped_two else ped_two
+        else:
+            tempinterpersonaldistance = ped_one
+        # if the last sampled interpersonal distance is smaller than the current, replace the current
+        if interpersonal_distance is None:
+            interpersonal_distance = tempinterpersonaldistance
+        else:
+            interpersonal_distance = interpersonal_distance if interpersonal_distance < tempinterpersonaldistance else tempinterpersonaldistance
+        yield viztask.waitTime(0.1)
+
+# Reads in the landmarks and adds a sequence of walking actions that will be executed by the pedestrians to the landmarks.
+def pedestrian_walk_queue(env, activepeds, landmarkarray):
+    walking_landmarks = landmarkarray[env] if not isinstance(landmarkarray[env], dict) else landmarkarray[env][
+        random.choice(list(landmarkarray[env].keys()))]
+    for p in activepeds:
+        p.addAction(vizact.sequence(walking_landmarks[activepeds.index(p)]))
+        yield viztask.waitTime(0.3)
+
+
+# Actions are preconstructed and randomly sampled during trials.
+local_road_start_actions = pa.create_walking_actions('localroad',
+                                                  pedestrianStartLandmarks['localroad'],
+                                                  pedestrianStartOffsets,
+                                                  True,
+                                                  pedestrianCrossingLandmarks['localroad']['straight'][0])
+midblock_start_actions = pa.create_walking_actions('midblock',
+                                                pedestrianStartLandmarks['midblock'],
+                                                pedestrianStartOffsets,
+                                                True,
+                                                pedestrianCrossingLandmarks['midblock']['straight'][0])
+local_road_crossing_actions = {}
+midblock_crossing_actions = {}
+
+for k, v in pedestrianCrossingLandmarks['localroad'].items():
+    local_road_crossing_actions[k] = pa.create_walking_actions('localroad', v, pedestrianStartOffsets, False)
+
+for k, v in pedestrianCrossingLandmarks['midblock'].items():
+    midblock_crossing_actions[k] = pa.create_walking_actions('midblock', v, pedestrianStartOffsets, False)
+
+start_actions = {
+    'localroad': local_road_start_actions,
+    'midblock': midblock_start_actions
+    }
+        
+crossing_actions = {
+    'localroad': local_road_crossing_actions,
+    'midblock': midblock_crossing_actions
+    }
+
+# Pre-trial behavior. Pedestrians appear and walk to their starting positions. Footsteps are played.
+def pedestrianStartRoutine(environment):
+    global virtualPedsAtStart, pedestrians_active
+    virtualPedsAtStart = False
+    pedestrians_active = True
+    pedestrians = []
+    for p in active_pedestrians[:-1]:
+        pedestrians.append(p)
+
+    for p in pedestrians:
+        offset = 0
+        if p is pedestrians[0]:
+            offset = pedestrianStartOffsets[environment][0]
+        p.setPosition(
+            pedestrianAppearanceLocations[environment][0] +
+            offset,
+            pedestrianAppearanceLocations[environment][1],
+            pedestrianAppearanceLocations[environment][2]
+        )
+        p.setEuler(
+            0,
+            pedestrianAppearanceOrientations[environment],
+            0
+        )
+        #p.visible(viz.ON)
+        viztask.schedule(pedestrianFootsteps(p))
+
+    viztask.schedule(pedestrianInterPersonalDistance(len(pedestrians)))
+
+    viztask.schedule(pedestrian_walk_queue(environment, pedestrians, start_actions))
+    
+
+    if (environment == "localroad"):
+        yield viztask.waitTrue(lambda: localRoadSensorStart in
+                                       localRoadManager.getSensorsContainingTarget(pedestrians[0]))
+    else:
+        yield viztask.waitTrue(
+            lambda: midblockSensorStart in
+                    midblockManager.getSensorsContainingTarget(pedestrians[0]))
+
+    virtualPedsAtStart = True
+    print("[Peds]: At start.")
+
+
+# During-trial behavior
+
+virtualPedsCrossed = False
+
+# Pedestrians look botrh ways and cross the street at a time dependent on the crossing type/aggression condition.
+def pedestrianCrossRoutine(environment, eHMI_, signal):
+    global virtualPedsCrossing, gazeRoutineFinished, virtualPedsCrossed, carStopped, trialSignaled
+
+    virtualPedsCrossing = False
+    virtualPedsCrossed = False
+
+    pedestrians = active_pedestrians[:-1]
+    two_peds = len(pedestrians) == 2
+
+    yield viztask.waitTrue(lambda: trialSignaled)
+
+    viztask.schedule(pedestrianGazeFollowCar(1, environment))
+    if two_peds:
+        yield viztask.waitFrame(random.randint(5, 35))
+        viztask.schedule(pedestrianGazeFollowCar(2, environment))
+
+    print("[Peds]: Waiting to cross.")
+
+    if eHMI_ == "Blank Interface No Stop":
+        yield signal.wait()
+        yield viztask.waitTime(1)
+        virtualPedsCrossing = True
+        yield viztask.waitTrue(lambda: gazeRoutineFinished)
+        print("[Peds]: Blank interface crossing.")
+
+    else:
+        yield signal.wait()
+        virtualPedsCrossing = True
+        yield viztask.waitTrue(lambda: gazeRoutineFinished)
+
+    print("[Peds]: Crossing initiated.")
+    yield viztask.schedule(pedestrian_walk_queue(environment, pedestrians, crossing_actions))
+
+    if environment == "localroad":
+        virtual_ped_target = vizproximity.Target(pedestrians[0])
+        localRoadManager.addTarget(virtual_ped_target)
+        yield vizproximity.waitEnter(localRoadSensorEnd, virtual_ped_target)
+        localRoadManager.removeTarget(virtual_ped_target)
+    else:
+        virtual_ped_target = vizproximity.Target(pedestrians[0])
+        midblockManager.addTarget(virtual_ped_target)
+        yield vizproximity.waitEnter(midblockSensorEnd, virtual_ped_target)
+        midblockManager.removeTarget(virtual_ped_target)
+    virtualPedsCrossed = True
+    print("[Peds]: Crossing finished.")
+
+# Functions which add fade actions to the vehicle and its children, executing after a signal is triggered.
+def prepareVehicle(av_list):
+    signal = vizact.signal()
+    wait_for_signal = signal.wait
+    for av_object in av_list:
+        
+        #av_object.visible(viz.ON)
+        av_object.runAction(
+            vizact.sequence([wait_for_signal, fadeIn]))
+    yield viztask.waitTime(.45)
+    participant.runAction(signal.trigger)
+    print("[AV]: Load-in triggered.")
+
+def removeVehicle(av_list):
+    signal = vizact.signal()
+    wait_for_signal = signal.wait
+    for av_object in av_list:
+        #av_object.visible(viz.OFF)
+        av_object.runAction(
+            vizact.sequence([wait_for_signal, fadeOut]))
+    yield viztask.waitTime(.45)
+    participant.runAction(signal.trigger)
+    print("[AV]: Removal triggered.")
+
+
+# ==============================================================================
+# Vehicle Handler --------------------------------------------------------------
+# ==============================================================================
+# Controls the vehicle's behavior during the trials, determining the behavior of
+# the vehicle based on the eHMI and the environment, as well as the participant's
+# behavior. Begins by fading in and approaching the crossing. Then, the vehicle
+# initiates braking (if a yielding condition), and animates the eHMI (if an eHMI
+# present condition). Finally, when the vehicle is at the crossing, it waits for
+# the participant and virtual pedestrians (if any) to cross before continuing.
+#
+#This function controls when the cross routine for pedestrians is initiated.
+# ==============================================================================
+
+
+def vehicleBehavior(environment, eHMI_, peds, aggression):
+    global braking, interface, turnFrom, carStopped, stopTime, signalTime, \
+        participantCrossed, virtualPedsCrossedTime, trialSignaled, afterNonYielding, nonYield
+    resetPhase()
+    print("[Vehicle]: Behavior initiated.")
+    carStopped = False
+    braking = False
+    signalDistance_ = signalDistance
+    distance_signal = viztask.Signal()
+    crossing_signal = viztask.Signal()
+    signalTime = None
+    stopTime = 0
+    driver_list = driverSetup()
+    driver = driver_list[0]
+    driver_head = driver_list[1]
+    #yield viztask.waitTime(.3)
+    if environment == "localroad":
+        av.setPosition(startPosition_LocalRoad)
+        av.setEuler(90, 0, 0)
+    else:
+        av.setPosition(start_position_midblock)
+        av.setEuler(180, 0, 0)
+
+    print("[Main]: AV behavior started.")
+
+    if peds:
+        viztask.schedule(pedestrianCrossRoutine(
+            environment,
+            eHMI_,
+            crossing_signal))
+
+    if eHMI_ == "No Interface":
+        interface = False
+        eHMI.visible(viz.OFF)
+        yield viztask.waitTask(prepareVehicle([av, front_wheels, back_wheels, driver]))
+    else:
+        eHMI.setCompositeAlpha(0)
+        screen.setCompositeAlpha(0)
+        eHMI.visible(viz.ON)
+        yield viztask.waitTask(prepareVehicle([av, front_wheels, back_wheels, driver, eHMI, screen]))
+
+    # Action and position setup -----------------------------------
+    if environment == "localroad":
+        if eHMI_ == "Blank Interface No Stop":
+            viztask.schedule(leftTurn(eHMI_))
+            signalDistance_ += 6.096
+        else:
+            av.addAction(moveToCrossingLocalRoad)
+            signalDistance_ += 3.048
+        end_position = end_position_local_road
+
+    elif environment == "midblock":
+        if eHMI_ == "Blank Interface No Stop":
+            av.addAction(moveThroughCrossingMidblock)
+            signalDistance_ += 6.096
+            braking = False
+            nonYield = True
+            afterNonYielding = True
+        else:
+            av.addAction(moveToCrossingMidblock)
+            signalDistance_ += 3.048
+
+        end_position = end_position_midblock
+    yield viztask.waitTime(.5)
+    # Prior to SSD
+    driving.play(viz.LOOP)
+    viztask.schedule(tireMovement("brake"))
+    yield viztask.waitTrue(lambda: vehicleDistanceAssessment(environment, end_position, signalDistance_))
+
+    signal_trial_sound.play()
+    trialSignaled = True
+    signalTime = datetime.now()
+    print("[Main]: Trial Signaled")
+
+    if eHMI_ != "Blank Interface No Stop":
+        # Once vehicle is meant to start braking...
+        yield viztask.waitTrue(lambda: vehicleDistanceAssessment(environment, end_position, ssdDistance))
+        braking = True
+
+        print("[Main]: AV passing safe stopping distance threshold")
+    else:
+        screen.color(0, 0, 0)
+
+    if eHMI_ == "Segmented Circle":
+        screen.texture(eHMI_sectionedCircle)
+        screen.color(255, 255, 255)
+        interface = True
+        viztask.schedule(eHMIanimation(eHMI_sectionedCircle, end_position))
+        SoundVibration.eHMISyncSense1()
+    # If no interface, do not turn on the screen.
+
+    if eHMI_ != "Blank Interface No Stop":
+        # Once vehicle is meant to start braking...
+        yield viztask.waitTrue(lambda: vehicleDistanceAssessment(environment, end_position, beginBrakingDistance))
+        distance_signal.send()
+        print("[Main]: Vehicle braking.")
+    else:
+        non_yield = viztask.schedule(nonYieldingRoutine(crossing_signal, driver_head, end_position, environment))
+        SoundVibration.senseNoStop()
+        yield viztask.waitTrue(lambda: not non_yield.alive())
+        yield viztask.schedule(removeVehicle([av, front_wheels, back_wheels, eHMI, driver]))
+        yield viztask.waitTime(.7)
+        driverUnload(driver)
+        print("[Main]: Vehicle behavior routine ending")
+        return
+
+    # If this a condition with braking, turn on the lights, play the correct sounds,
+    # and turn some things off when at a complete stop.
+    if braking:
+        yield viztask.schedule(brakingRoutine(aggression, crossing_signal, driver_head, eHMI_, environment, end_position))
+
+        if environment == "localroad":
+            yield viztask.waitTrue(lambda: participantCrossed)
+            if peds: yield viztask.waitTrue(lambda: virtualPedsCrossed)
+        else:
+            yield viztask.waitTrue(lambda: participantCrossed)
+            if peds: yield viztask.waitTrue(lambda: virtualPedsCrossed)
+
+        print("[Main]: Vehicle accelerating through crossing.")
+        if eHMI_ != "Blank Interface No Stop":
+            yield viztask.schedule(accelerateFromStop(eHMI_, environment))
+
+        yield viztask.waitTime(4)
+
+        yield viztask.waitTime(3)
+        if eHMI_ == "Segmented Circle":
+            yield viztask.schedule(removeVehicle([av, front_wheels, back_wheels, eHMI, driver]))
+        else:
+            yield viztask.schedule(removeVehicle([av, front_wheels, back_wheels, driver]))
+        yield viztask.waitTime(.5)
+        driverUnload(driver)
+        return
+
+    return
+
+
+def nonYieldingRoutine(crossing_signal, driver_head, end_position, environment):
+    global carStopped, stopTime
+    if environment == "localroad":
+        yield viztask.waitTrue(lambda: vehicleDistanceAssessment(environment, end_position, beginBrakingDistance))
+        approach.play()
+        brake_lights.visible(viz.ON)
+        left_blinker.runAction(blinkAction)
+        driver_head.lock()
+        driver_head.setEuler(0, -45, 0)
+    yield viztask.waitTrue(lambda: vehicleDistanceAssessment(environment, end_position, 0))
+    yield viztask.waitTime(1)
+    print("[Vehicle]: Passed crosswalk; sending crossing signal.")
+    crossing_signal.send()
+    carStopped = True
+    brake_lights.visible(viz.OFF)
+    left_blinker.clearActions()
+    left_blinker.visible(viz.OFF)
+    driver_head.unlock()
+    yield viztask.waitTime(4)
+    stopTime = (datetime.now() - trialBeginTime).total_seconds()
+    driving.pause()
+
+
+def vehicleDistanceAssessment(environment, destination, distance_threshold):
+    # Only one dimension is relevant depending on the environment, x or z.
+    vehicle_position = av.getPosition()
+    if environment == "localroad":
+        return vehicle_position[0] > destination[0] - distance_threshold
+    else:
+        return vehicle_position[2] < destination[2] + distance_threshold
+
+
+def accelerateFromStop(eHMI_, environment):
+    global turnFrom
+    if environment == "localroad":
+        # Make sure not to add redundant animation steps to the left turn
+        if turnFromStopLocalRoad.getControlPoint(0) is turnFrom:
+            turnFromStopLocalRoad.removeControlPoint(0)
+
+        turnFrom = viz.addControlPoint(
+            pos=av.getPosition(),
+            euler=[90, 0, 0])
+
+        turnFromStopLocalRoad.addControlPoint(0, turnFrom)
+
+        viztask.schedule(leftTurn(eHMI_))
+        acceleration.play()
+        yield viztask.waitFrame(45)
+        brake_lights.visible(viz.OFF)
+        left_blinker.endAction()
+        left_blinker.visible(viz.OFF)
+
+
+    else:
+        acceleration.play()
+        brake_lights.visible(viz.OFF)
+        av.runAction(accelerateThroughCrossingMidblock)
+        viztask.schedule(tireMovement("accel"))
+
+
+def brakingRoutine(aggression, crossing_signal, driver_head, eHMI_, environment, end_position):
+    global braking, carStopped, stopTime
+    approach.play()
+    driving.stop()
+    brake_lights.visible(viz.ON)
+    if environment == "localroad":
+        left_blinker.runAction(blinkAction)
+    if aggression == "Aggressive":
+        yield viztask.waitTrue(lambda: vehicleDistanceAssessment(environment, end_position, 20))
+        crossing_signal.send()
+    # Begin playing approach sound
+    
+    
+
+    # Turn driver's head toward participant and lock
+    driver_head.lock()
+    driverangle = -45 if environment == "localroad" else 45
+    driver_head.setEuler(0, driverangle, 0)
+
+    yield viztask.waitTrue(lambda: vehicleDistanceAssessment(environment, end_position, 0.1))
+
+
+
+    approach.stop()
+    if eHMI_ == "Segmented Circle":
+        screen.texture(viz.OFF)
+        screen.color(0, 0, 0)
+    if aggression == "Cautious":
+        crossing_signal.send()
+    braking = False
+    carStopped = True
+    print("[Vehicle]: Stopped at crosswalk; sending crossing signal for cautious condition.")
+    viztask.schedule(tireMovement("stop"))
+    stopTime = (datetime.now() - signalTime).total_seconds()
+    yield viztask.waitTime(2)
+    driver_head.unlock()
+
+
+# ====================================================================================
+# Practice Block ---------------------------------------------------------------------
+# ====================================================================================
+# This function handles the practice block. It is called before the main experiment
+# and is used to give the participant a chance to familiarize themselves with the
+# flow of trials. Instructions are displayed to reinforce the steps the participant
+# should take at each stage of the trial. In the second trials of both environments,
+# a prop car is spawned that drives through the intersection without the participant
+# needing to consider its yielding behavior. This is to help the participant learn
+# how the appearance of objects in VR changes with distance.
+# ====================================================================================
+
+
+def PracticeBlock():
+    global trialSignaled
+    # Load the environment in and fade out the gray screen.
+    toggleFixationRegions("practice")
+    yield loadEnvironment(localRoadEnvironment)
+    ToggleSensors("LocalRoad")
+
+    yield viztask.waitTime(1)
+    yield eyetracking.fadeQuad.fade_out()
+
+    for i in [1, 2, 3]:
+        trialSignaled = False
+        warningBox.setParent(localRoadEnvironment)
+        warningBox.runAction(custom.highlightGlow(ceiling=.8))
+        warningBox.visible(viz.ON)
+        if i == 1:
+            yield viztask.waitKeyUp(" ")
+
+        # Once space is pressed, highlight the start and place "move to here" text over it.
+        highlightBoxLocalRoad.visible(viz.ON)
+        if i == 1:
+            moveToText.visible(viz.ON)
+        else:
+            StartText.visible(viz.ON)
+            highlightBoxLocalRoad.setPosition(3.45, 1, 0)
+
+        highlightBoxLocalRoad.runAction(custom.highlightGlow())
+        yield viztask.waitAny([vizproximity.waitEnter(localRoadSensorStart, participantTarget),
+                               viztask.waitTrue(
+                                   lambda: localRoadSensorStart in localRoadManager.getSensorsContainingTarget(
+                                       participant))])
+        warningBox.visible(viz.OFF)
+
+        if i == 2:
+            viztask.schedule(movePropVehicle())
+
+        # Once participant enters, turn off the highlighting box and text, and instead turn on text that instructs them to wait.
+
+        EndOfTrialText.visible(viz.OFF)
+        highlightBoxLocalRoad.visible(viz.OFF)
+        StartText.visible(viz.OFF)
+        moveToText.visible(viz.OFF)
+        WaitText.message("Trial not started \n Wait for signal")
+        if i == 1:
+            WaitText.visible(viz.ON)
+        else:
+            WaitText.runAction(fadeIn)
+
+        # On pressing of space, send auditory signal to cross and highlight the end point with text. Change "wait" text to go and fade it.
+        yield viztask.waitTime(5)
+        signal_trial_sound.play()
+        trialSignaled = True
+
+        highlightBoxLocalRoad.setPosition(-1.5, 1, 0)
+        highlightBoxLocalRoad.visible(viz.ON)
+        highlightBoxLocalRoad.runAction(custom.highlightGlow())
+        moveToText.visible(viz.ON)
+        moveToText.setPosition(highlightBoxLocalRoad.getPosition())
+        moveToText.runAction(custom.turnToFace(viz.MainView))
+        WaitText.message("Trial begun \n Cross when ready")
+        yield viztask.waitTime(1)
+        WaitText.runAction(fadeOut)
+
+        # Wait until participant crosses before unloading the environment and loading the midblock. Repeat above in the new environment.
+        yield vizproximity.waitEnter(localRoadSensorEnd, participantTarget)
+        if i != 3:
+            signal_end_sound.play()
+        highlightBoxLocalRoad.endAction()
+        moveToText.visible(viz.OFF)
+        highlightBoxLocalRoad.visible(viz.OFF)
+        if i == 1:
+            EndOfTrialText.visible(viz.ON)
+
+    signal_block_sound.play()
+    yield viztask.waitTime(signal_block_sound.getDuration())
+    eyetracking.fadeQuad.fade_in()
+    yield UnloadEnvironment(localRoadEnvironment)
+
+    yield loadEnvironment(midblockCrossingEnvironment)
+    ToggleSensors("Midblock")
+    yield viztask.waitTime(1)
+    yield eyetracking.fadeQuad.fade_out()
+    warningBox.setParent(midblockCrossingEnvironment)
+    warningBox.setPosition(-midblockCrossingEnvironment.getPosition()[0],
+                           -midblockCrossingEnvironment.getPosition()[1],
+                           -midblockCrossingEnvironment.getPosition()[2])
+
+    warningBox.visible(viz.ON)
+    yield viztask.waitAny([viztask.waitKeyUp(" "),
+                           viztask.waitTime(15)])
+
+    for i in [1, 2, 3]:
+        if i == 2:
+            viztask.schedule(movePropVehicle())
+
+        highlightBoxMidblock.setPosition(-2, 1, 0)
+        highlightBoxMidblock.visible(viz.ON)
+        highlightBoxMidblock.runAction(custom.highlightGlow())
+
+        moveToText.setPosition(highlightBoxMidblock.getPosition())
+        moveToText.runAction(custom.turnToFace(viz.MainView))
+        moveToText.visible(viz.ON)
+        trialSignaled = False
+
+        yield viztask.waitAny([vizproximity.waitEnter(midblockSensorStart, participantTarget),
+                               viztask.waitTrue(
+                                   lambda: midblockSensorStart in midblockManager.getSensorsContainingTarget(
+                                       participant))])
+        highlightBoxMidblock.alpha(0)
+        warningBox.visible(viz.OFF)
+        WaitText.visible(viz.ON)
+        WaitText.setPosition(1, 1.2, 0)
+        WaitText.message("Trial not started \n Wait for signal")
+        moveToText.visible(viz.OFF)
+        yield viztask.runAction(WaitText, fadeIn)
+        WaitText.runAction(custom.turnToFace(viz.MainView))
+
+        yield viztask.waitAny([viztask.waitKeyUp(" "),
+                               viztask.waitTime(5)])
+
+        signal_trial_sound.play()
+        trialSignaled = True
+
+        highlightBoxMidblock.setPosition(4, 1, 0)
+        highlightBoxMidblock.runAction(custom.highlightGlow())
+        moveToText.setPosition(highlightBoxMidblock.getPosition())
+        moveToText.visible(viz.ON)
+        moveToText.runAction(custom.turnToFace(viz.MainView))
+
+        WaitText.message("Trial has begun \n Cross when ready")
+        yield viztask.waitTime(1)
+        yield viztask.runAction(WaitText, fadeOut)
+        WaitText.visible(viz.OFF)
+
+        yield vizproximity.waitEnter(midblockSensorEnd, participantTarget)
+        moveToText.visible(viz.OFF)
+
+        if i < 3 or (i == 3 and order == 2):
+            signal_end_sound.play()
+        elif i == 3 and order == 1:
+            signal_practice_sound.play()
+
+        if (order == 2 and i == 3) or i < 3:
+            warningBox.runAction(custom.highlightGlow(ceiling=.8))
+            warningBox.visible(viz.ON)
+            highlightBoxMidblock.setPosition(-2, 1, 0)
+            warningBox.runAction(custom.highlightGlow(ceiling=.8))
+            EndOfTrialText.setPosition(6.1, 1, 0)
+            EndOfTrialText.visible(viz.ON)
+            StartText.setPosition(highlightBoxMidblock.getPosition())
+            StartText.visible(viz.ON)
+            yield viztask.waitAny([vizproximity.waitEnter(midblockSensorStart, participantTarget),
+                                   viztask.waitTrue(
+                                       lambda: midblockSensorStart in midblockManager.getSensorsContainingTarget(
+                                           participant))])
+
+            if i == 3:
+                signal_practice_sound.play()
+                warningBox.visible(viz.OFF)
+
+        highlightBoxMidblock.endAction()
+        highlightBoxMidblock.visible(viz.OFF)
+        EndOfTrialText.visible(viz.OFF)
+        StartText.visible(viz.OFF)
+    # Fades in a quad around the participant to hide the environment while it changes Should only run at the end of a block.
+    yield viztask.waitTime(signal_block_sound.getDuration() / 2)
+    eyetracking.fadeQuad.fade_in()
+    yield viztask.waitTime(signal_block_sound.getDuration() / 1.5)
+    yield UnloadEnvironment(midblockCrossingEnvironment)
+
+
+# Local Road Trial --------------------------------------------------------------------------
+
+
+def LocalRoadBlock(eHMI_, aggression, num_peds, ped_data):
+    # Define global variables
+    global behavioralData, trialBeginTime, virtualPedsAtStart, participantCrossed, participantEnteredRoadway, afterNonYielding, trialSignaledTime, interpersonal_distance
+    trialSignaled = False
+    interpersonal_distance = None
+    eyetracking.environment = "localroad"
+    # Face car the correct direction
+    av.setEuler(90, 0, 0)
+    # Add sensors to local road scenario
+    ToggleSensors("LocalRoad")
+    # Halt execution until participant enters the starting location
+    print("[Main]: New local road trial. Awaiting participant @ start.")
+    yield viztask.waitTrue(lambda: localRoadSensorStart in localRoadManager.getSensorsContainingTarget(
+                               participant))
+    if num_peds > 0:
+        print("[Main]: Ped routine signaled. Awaiting ped(s) @ start.")
+        viztask.schedule(pedestrianStartRoutine("localroad"))
+        yield viztask.waitTrue(lambda: virtualPedsAtStart)
+
+        print("[Main]: Counting down to trial start.")
+        yield viztask.waitTime(random.randint(1, 4))
+
+    else:
+        print("[Main]: Counting down to trial start.")
+        yield viztask.waitTime(random.randint(4, 8))
+
+    # BEGIN TRIAL --------------------------------------------------------------------------
+
+    # Enable eye tracking
+    eyetracking.trialUnderway = True
+    print("[Main]: Local road trial started with condition {}".format(eHMI_))
+    print("[Main]: Virtual Pedestrians: {}, Behavior: {}".format(
+        num_peds, aggression))
+    # Record begin time and initiate vehicle behavior
+    trialBeginTime = datetime.now()
+
+    v = viztask.schedule(vehicleBehavior("localroad", eHMI_, num_peds > 0, aggression))
+
+    # When participant enters crosswalk, measure time in seconds since the tone
+    yield vizproximity.waitEnter(localRoadSensorStreet, participantTarget)
+    yield viztask.waitTrue(lambda: signalTime is not None)
+    participant_roadway_enter_time = (
+            datetime.now() - signalTime).total_seconds()
+    participantEnteredRoadway = True
+    print("[Main]: Participant entered crosswalk at {}".format(
+        round(participant_roadway_enter_time, 3)))
+
+    if eHMI_ != "Blank Interface No Stop":
+        vehicle_at_participant_enter = vizmat.Distance(
+            av.getPosition(), crossing_LocalRoad)
+    else:
+        vehicle_at_participant_enter = vizmat.Distance(
+            av.getPosition(), participant.getPosition())
+
+    # Record whether the vehicle had come to a stop or not prior to participants' entry
+    vehicle_stopped_before_entry = not carStopped
+
+    # When participant finishes crossing, save crossing time and change boolean vars to signal changes to vehicle and eye tracking functions
+    yield viztask.waitTrue(lambda: localRoadSensorEnd in localRoadManager.getSensorsContainingTarget(participant))
+
+    if eHMI_ is not treatmentsLocalRoad[-1][0] or aggression is not treatmentsLocalRoad[-1][1] or num_peds is not \
+            treatmentsLocalRoad[-1][2]:
+        signal_end_sound.play()
+    elif eHMI_ is treatmentsLocalRoad[-1][0] and aggression is treatmentsLocalRoad[-1][1] and num_peds is \
+            treatmentsLocalRoad[-1][2] and order == 2:
+        signal_experiment_sound.play()
+        print("[Main]: Final trial completed.")
+    else:
+        signal_block_sound.play()
+
+    participantCrossed = True
+    print("[Main]: Participant crossed. Waiting for end of vehicle behavior.")
+    eyetracking.trialUnderway = False
+
+    trial_length = (datetime.now() - trialBeginTime).total_seconds()
+
+    # Make sure vehicle task is dead before continuing
+    yield viztask.waitTrue(lambda: not v.alive())
+    # END TRIAL --------------------------------------------
+    # Record trial results, saved after full block
+    updateData(eyetracking.participant.id, "localroad", [eHMI_, num_peds, aggression], trial_length,
+               participant_roadway_enter_time, vehicle_at_participant_enter,
+               stopTime, vehicle_stopped_before_entry,
+               afterNonYielding, ped_data, interpersonal_distance)
+    yield viztask.waitTime(3)
+    if eHMI_ == "Blank Interface No Stop":
+        afterNonYielding = True
+    participantEnteredRoadway = False
+    participantCrossed = False
+
+
+# Midblock Trial -------------------------------------------------------------------------
+
+
+def MidblockCrossingBlock(eHMI_, aggression, num_peds, ped_data):
+    global behavioralData, trialBeginTime, participantCrossed, participantEnteredRoadway, afterNonYielding, interpersonal_distance
+    eyetracking.environment = "midblock"
+    interpersonal_distance = None
+    # Position/orient av for midblock trial
+    yield av.setEuler(180, 0, 0)
+
+    print("[Main]: New midblock trial. Awaiting participant @ start.")
+    yield viztask.waitAny([vizproximity.waitEnter(midblockSensorStart, participantTarget),
+                           viztask.waitTrue(
+                               lambda: midblockSensorStart in midblockManager.getSensorsContainingTarget(participant))])
+    if num_peds > 0:
+        print("[Main]: Ped routine signaled. Awaiting ped(s) @ start.")
+        yield viztask.schedule(pedestrianStartRoutine("midblock"))
+        yield viztask.waitTrue(lambda: virtualPedsAtStart)
+        print("[Main]: Counting down to trial start.")
+        yield viztask.waitTime(random.randint(1, 4))
+    else:
+        print("[Main]: Counting down to trial start.")
+        yield viztask.waitTime(random.randint(4, 8))
+
+    # BEGIN TRIAL --------------------------------------------------------------------------
+    eyetracking.trialUnderway = True
+    print("[Main]: Midblock trial started with condition {}".format(eHMI_))
+    print("[Main]: Virtual Pedestrians: {}, Behavior: {}".format(
+        num_peds, aggression))
+    # Record begin time and initiate vehicle behavior
+    trialBeginTime = datetime.now()
+    v = viztask.schedule(vehicleBehavior("midblock", eHMI_, num_peds > 0, aggression))
+
+    # Wait for participant to enter street before recording time and updating boolean
+    yield vizproximity.waitEnter(midblockSensorStreet, participantTarget)
+    yield viztask.waitTrue(lambda: signalTime is not None)
+    participant_roadway_enter_time = (
+            datetime.now() - signalTime).total_seconds()
+    print("[Main]: Participant entered crosswalk at {}".format(
+        round(participant_roadway_enter_time, 3)))
+    participantEnteredRoadway = True
+
+    # Record vehicle's position (distance from stopping point for braking conditions, participant for non-yielding)
+    if eHMI_ != "Blank Interface No Stop":
+        vehicle_at_participant_enter = vizmat.Distance(
+            av.getPosition(), crossing_midblock)
+    else:
+        vehicle_at_participant_enter = vizmat.Distance(
+            av.getPosition(), participant.getPosition())
+    # Record whether participant entered crosswalk before end of vehicle routine
+    vehicle_stopped_before_entry_time = carStopped
+
+    yield vizproximity.waitEnter(midblockSensorEnd, participantTarget)
+    participantCrossed = True
+
+    if eHMI_ is not treatmentsMidblock[-1][0] or aggression is not treatmentsMidblock[-1][1] or num_peds is not \
+            treatmentsMidblock[-1][2]:
+        signal_end_sound.play()
+    elif eHMI_ is treatmentsMidblock[-1][0] and aggression is treatmentsMidblock[-1][1] and num_peds is \
+            treatmentsMidblock[-1][2] and order == 1:
+        signal_experiment_sound.play()
+        print("[Main]: Final trial completed.")
+    else:
+        signal_block_sound.play()
+
+    # Finish eye tracking loop
+    print("[Main]: Participant crossed. Waiting for end of vehicle behavior.")
+    eyetracking.trialUnderway = False
+    # When participant crosses, take crossing time.
+    trial_length = (datetime.now() - trialBeginTime).total_seconds()
+
+    # END TRIAL --------------------------------------------
+    # Make sure vehicle task is dead before continuing
+    yield viztask.waitTrue(lambda: not v.alive())
+    # Save data
+    updateData(eyetracking.participant.id, "midblock", [eHMI_, num_peds, aggression], trial_length,
+               participant_roadway_enter_time, vehicle_at_participant_enter,
+               stopTime, vehicle_stopped_before_entry_time,
+               afterNonYielding, ped_data,
+               interpersonal_distance)
+    yield viztask.waitTime(3)
+    print("[Main]: End of midblock trial")
+    if eHMI_ == "Blank Interface No Stop":
+        afterNonYielding = True
+    participantEnteredRoadway = False
+    participantCrossed = False
+
+
+# TRIAL LOOPS -----------------------------------
+
+pedestrian_container = loadAvatars()
+
+def Experiment(order_, practice_, startFrom):
+    global blockNum, trialNum, pedestrians_active, pedestrian_container
+
+    eyetracking.experimentStarted = True
+    eyetracking.fadeQuad.fade_in()
+    blockNum = 1
+    trialNum = 1
+    practiceTrials = practice_
+    order = order_
+
+    if not os.path.exists('data/trialorder/{}.csv'.format(pid)):
+        print("Saving trial order")
+        if not os.path.exists('data/trialorder/'):
+            os.makedirs('data/trialorder//')
+        fileName = 'data/trialorder/{}.csv'.format(pid)
+        saveTrialOrder(order, fileName)
+    else:
+        print("[Main]: Loading saved trial order, and starting from trial {}".format(startFrom))
+
+    eyetracking.vehicleNodeID = av.id
+    # av.visible(viz.OFF)
+
+    ambience.play()
+    ambience.loop(viz.ON)
+
+    if practiceTrials:
+        yield viztask.waitTask(PracticeBlock)
+        print("[Main]: Practice trials completed.")
+    else:
+        print("[Main]: Skipping practice trials.")
+        
+    unloadPracticeTrialObjects(practiceTrialObjects)
+
+    
+    # Conditional logic for the two orders. Order 1: Local Road -> Midblock -> Experiment 2 Midblock -> Experiment 2 LocalRoad
+    if order == 1:
+        # startFrom defaults to 0. If it is set to be higher (i.e., RA is recovering from a crash later in the experiment)
+        # the preceding blocks will be skipped.
+        if startFrom <= 13:
+            print("[Main]: Beginning experiment 1 with local road environment.")
+            print(treatmentsLocalRoad[1])
+            print(treatmentsLocalRoad[1][0])
+            viztask.schedule(eyetracking.experiment(
+                (treatmentsLocalRoad + treatmentsMidblock), pid))
+            yield viztask.waitAsyncLoad(localRoadEnvironment)
+            toggleFixationRegions("LocalRoad")
+            ToggleSensors("LocalRoad")
+            yield loadEnvironment(localRoadEnvironment)
+            yield viztask.waitTime(1)
+            yield eyetracking.fadeQuad.fade_out()
+            
+            for condition in treatmentsLocalRoad:
+                yield viztask.waitAny([vizproximity.waitEnter(localRoadSensorStart, participantTarget),
+                                       viztask.waitTrue(lambda: localRoadSensorStart in
+                                                                localRoadManager.getSensorsContainingTarget(
+                                                                    participant
+                                                                ))])
+                ped_data = randomizeAvatars(int(condition[2]) + 1)
+
+                yield viztask.waitTask(LocalRoadBlock(condition[0], condition[1], int(condition[2]), ped_data))
+                pedestrians_active = False
+                yield viztask.waitTime(.5)
+                saveData(pid)
+                trialNum += 1
+                
+
+            
+
+            yield eyetracking.fadeQuad.fade_in()
+            yield viztask.waitTime(.5)
+            yield UnloadEnvironment(localRoadEnvironment)
+            yield viztask.waitTime(.5)
+
+        if startFrom > 13:
+            viztask.schedule(eyetracking.experiment(treatmentsMidblock, pid))
+
+        if startFrom <= 26:
+
+            toggleFixationRegions("Midblock")
+            ToggleSensors("Midblock")
+
+            yield loadEnvironment(midblockCrossingEnvironment)
+            yield viztask.waitTime(1)
+            yield eyetracking.fadeQuad.fade_out()
+
+            print(
+                "[Main]: Block 1 ended. Press space after break to continue with block 2.")
+
+            # signal_experiment_sound.play()
+            if not debug:
+                yield viztask.waitKeyUp(" ")
+
+            blockNum += 1
+            trialNum = 1
+
+            for condition in treatmentsMidblock:
+                yield viztask.waitAny([vizproximity.waitEnter(midblockSensorStart, participantTarget),
+                                       viztask.waitTrue(
+                                           lambda: midblockSensorStart in midblockManager.getSensorsContainingTarget(
+                                               participant))])
+                ped_data = randomizeAvatars(int(condition[2]) + 1)
+
+                yield viztask.waitTask(MidblockCrossingBlock(condition[0], condition[1], int(condition[2]), ped_data))
+                pedestrians_active = False
+                yield viztask.waitTime(.5)
+                saveData(pid)
+                trialNum += 1
+                
+
+            print("[Main]: Experiment ended. Shutting down in 25 seconds.")
+            
+            yield viztask.waitTime(25)
+            viz.quit()
+
+    # Order 2: Midblock -> Local Road -> Experiment 2 Local Road -> Experiment 2 Midblock
+    else:
+        if startFrom <= 13:
+            print("[Main]: Beginning experiment 1 with midblock environment.")
+            print(treatmentsMidblock)
+
+            viztask.schedule(eyetracking.experiment(
+                (treatmentsMidblock + treatmentsLocalRoad), pid))
+            toggleFixationRegions("Midblock")
+            ToggleSensors("Midblock")
+            yield loadEnvironment(midblockCrossingEnvironment)
+            yield viztask.waitTime(1)
+            yield eyetracking.fadeQuad.fade_out()
+
+            for condition in treatmentsMidblock:
+                yield viztask.waitAny([vizproximity.waitEnter(midblockSensorStart, participantTarget),
+                                       viztask.waitTrue(
+                                           lambda: midblockSensorStart in midblockManager.getSensorsContainingTarget(
+                                               participant))])
+                ped_data = randomizeAvatars(int(condition[2]) + 1)
+
+                yield viztask.waitTask(MidblockCrossingBlock(condition[0], condition[1], int(condition[2]), ped_data))
+                pedestrians_active = False
+                yield viztask.waitTime(.5)
+                saveData(pid)
+                trialNum += 1
+                
+
+            
+            yield eyetracking.fadeQuad.fade_in()
+            yield viztask.waitTime(.5)
+            yield UnloadEnvironment(midblockCrossingEnvironment)
+            yield viztask.waitTime(.5)
+
+
+        if startFrom > 13:
+            viztask.schedule(eyetracking.experiment(
+                treatmentsLocalRoad, pid))
+
+        if startFrom <= 26:
+            yield loadEnvironment(localRoadEnvironment)
+            toggleFixationRegions("LocalRoad")
+            ToggleSensors("LocalRoad")
+            yield eyetracking.fadeQuad.fade_out()
+
+            print(
+                "[Main]: Block 1 ended. Press space after break to continue with block 2.")
+            if not debug:
+                yield viztask.waitKeyUp(" ")
+            blockNum += 1
+            trialNum = 1
+            print(treatmentsLocalRoad)
+
+            for condition in treatmentsLocalRoad:
+                yield viztask.waitAny([vizproximity.waitEnter(localRoadSensorStart, participantTarget),
+                                       viztask.waitTrue(
+                                           lambda: localRoadSensorStart in localRoadManager.getSensorsContainingTarget(
+                                               participant))])
+                ped_data = randomizeAvatars(int(condition[2]) + 1)
+
+                yield viztask.waitTask(LocalRoadBlock(condition[0], condition[1], int(condition[2]), ped_data))
+                pedestrians_active = False
+                yield viztask.waitTime(.5)
+                saveData(pid)
+                trialNum += 1
+
+            
+
+            print("[Main]: Experiment ended. Shutting down in 25 seconds.")
+            yield viztask.waitTime(25)
+            viz.quit()
+
+
+def saveTrialOrder(order, fileName):
+    trial_order = []
+    for t in range(len(treatmentsLocalRoad + treatmentsMidblock)):
+        if order == 1:
+            if t < 13:
+                row = {
+                    "pid": pid,
+                    "order": order,
+                    "trial": t + 1,
+                    "eHMI": treatmentsLocalRoad[t][0],
+                    "aggression": treatmentsLocalRoad[t][1],
+                    "num_peds": treatmentsLocalRoad[t][2],
+                }
+            else:
+                row = {
+                    "pid": pid,
+                    "order": order,
+                    "trial": t + 1,
+                    "eHMI": treatmentsMidblock[t - 13][0],
+                    "aggression": treatmentsMidblock[t - 13][1],
+                    "num_peds": treatmentsMidblock[t - 13][2],
+                }
+        if order == 2:
+            if t < 13:
+                row = {
+                    "pid": pid,
+                    "order": order,
+                    "trial": t + 1,
+                    "eHMI": treatmentsMidblock[t][0],
+                    "aggression": treatmentsMidblock[t][1],
+                    "num_peds": treatmentsMidblock[t][2],
+                }
+            else:
+                row = {
+                    "pid": pid,
+                    "order": order,
+                    "trial": t + 1,
+                    "eHMI": treatmentsLocalRoad[t - 13][0],
+                    "aggression": treatmentsLocalRoad[t - 13][1],
+                    "num_peds": treatmentsLocalRoad[t - 13][2],
+                }
+        trial_order.append(row)
+    fh.save_data_threaded(trial_order, fileName)
+    print("Trial order saved.")
+
+
+# Experiment Generation ------------------------------------
+# 1 = Local Road first, #2 = Midblock first
+
+
+def generateExperiment(recover, startFrom):
+    global treatmentsLocalRoad, treatmentsMidblock, order, practiceTrials
+    treatmentsLocalRoad = []
+    treatmentsMidblock = []
+    print(os.path.exists('data/trialorder/{}.csv'.format(pid)))
+    if not recover and not os.path.exists('data/trialorder/{}.csv'.format(pid)):
+        # Condition vectors
+        experimental_trials = [
+            ["No Interface", "None", 0],
+            ["Blank Interface No Stop", "None", 0],
+            ["Segmented Circle", "None", 0],
+            ["No Interface", "Cautious", 1],
+            ["Blank Interface No Stop", "Cautious", 1],
+            ["Segmented Circle", "Cautious", 1],
+            ["No Interface", "Cautious", 2],
+            ["Blank Interface No Stop", "Cautious", 2],
+            ["Segmented Circle", "Cautious", 2],
+            ["No Interface", "Aggressive", 1],
+            ["Segmented Circle", "Aggressive", 1],
+            ["No Interface", "Aggressive", 2],
+            ["Segmented Circle", "Aggressive", 2]
+        ]
+
+        # Randomize conditions for each participant.
+        # Constraint: Blank Interface No Stop can't be first. Yes, this is a dumb way to do it.
+        treatmentsLocalRoad = random.sample(
+            experimental_trials,
+            len(experimental_trials)
+        )
+        while treatmentsLocalRoad[0][0] == "Blank Interface No Stop":
+            treatmentsLocalRoad = random.sample(
+                experimental_trials,
+                len(experimental_trials)
+            )
+
+        treatmentsMidblock = random.sample(
+            experimental_trials,
+            len(experimental_trials)
+        )
+        while treatmentsMidblock[0][0] == "Blank Interface No Stop":
+            treatmentsMidblock = random.sample(
+                experimental_trials,
+                len(experimental_trials)
+            )
+
+
+    # Recovering from crash handling. startFrom is the index of the selection, so essentially the experimental block - 1.
+    else:
+        # Recover participants' trial order and load it as a data frame.
+        fileName = 'data/trialorder/{p}.csv'.format(p=pid)
+        trials = pandas.read_csv(fileName)
+        order = trials['order'].values[0]
+        practiceTrials = False
+        
+        if recover and (startFrom is None or startFrom == "" or startFrom == 0):
+            n = 0
+            if len(os.listdir('data/tracking/{}/'.format(pid))) > 0:
+                for file in os.listdir('data/tracking/{}/'.format(pid)):
+                    if file.endswith(".csv"):
+                        n += 1
+            if n > 0:
+                startFrom = n
+        elif not recover:
+            startFrom = 1
+        else:
+            startFrom = int(startFrom)
+
+        if order == 1:
+            for t in range(startFrom - 1, len(trials)):
+                if t < 13:
+                    treatmentsLocalRoad.append(
+                        [
+                            trials['eHMI'].values[t],
+                            trials['aggression'].values[t],
+                            trials['num_peds'].values[t]
+                        ]
+                    )
+                else:
+                    treatmentsMidblock.append(
+                        [
+                            trials['eHMI'].values[t],
+                            trials['aggression'].values[t],
+                            trials['num_peds'].values[t]
+                        ]
+                    )
+        elif order == 2:
+            for t in range(startFrom - 1, len(trials)):
+                if t < 13:
+                    treatmentsMidblock.append(
+                        [
+                            trials['eHMI'].values[t],
+                            trials['aggression'].values[t],
+                            trials['num_peds'].values[t]
+                        ]
+                    )
+                else:
+                    treatmentsLocalRoad.append(
+                        [
+                            trials['eHMI'].values[t],
+                            trials['aggression'].values[t],
+                            trials['num_peds'].values[t]
+                        ]
+                    )
+    return startFrom
+
+
+localRoadEnvironment.visible(viz.OFF)
+midblockCrossingEnvironment.visible(viz.OFF)
+def experimentSetup():
+    global inputDict, pid, debug, recover, startFrom, eyetracking, avatarNum
+    # Read inputs from GUI, use to set variables
+    inputDict = yield viztask.waitTask(get_gui_input())
+    pid = inputDict['pid']
+    debug = inputDict['debug']
+    recover = inputDict['recover']
+    avatarNum = inputDict['avatarNum']
+    if recover:
+        startFrom = int(inputDict['startFrom'])
+    if not recover:
+        startFrom = 0
+    
+    # Create vizconnect instance, set Avatar
+    vizconnect_ = vizconnectSetup(inputDict['vizconnect_config'])
+    fh.init()
+    
+    # Initiate eye tracking script
+    from Scripts import SightLab_VR as eyetracking
+    eyetracking.use_vive_pro = True if inputDict['vizconnect_config'] in ['Vive Pro', 'Vive Pro Eye [No Controllers]'] else False
+    eyetracking.eyeTracker = vizconnect.getTracker('eye_tracker').getRaw()
+    addObjectstoEyeTracking()
+    
+
+        
+    startFrom = generateExperiment(recover, startFrom)
+
+    viztask.schedule(Experiment(order, practiceTrials, startFrom))
+
+def addObjectstoEyeTracking():
+    eyetracking.objects.append(localRoadEnvironment)
+    eyetracking.objects.append(midblockCrossingEnvironment)
+    eyetracking.objects.append(skyDome)
+    eyetracking.objects.append(av)
+    eyetracking.objects.append(left_front)
+    eyetracking.objects.append(right_front)
+    eyetracking.objects.append(back_wheels)
+    eyetracking.objects.append(left_blinker)
+    eyetracking.objects.append(brake_lights)
+    for key, ped in pedestrian_container.items():
+        eyetracking.objects.append(ped)
+    for i in av_fixationregions.getNodeNames(flags=viz.TYPE_GROUP):
+        group = re.search(filt, i)
+        if group is not None:
+            n = av_fixationregions.getChild(i)
+            eyetracking.gazeObjectsDict[i] = n
+            print(i + " added to gazeObjectsDict")
+            if debug:
+                av_fixationregions.getChild(i).alpha(0.2)
+                n.drawOrder(10, bin=viz.BIN_TRANSPARENT)
+            else:
+                n.alpha(0)
+    for i in localRoadFixations.getNodeNames(flags=viz.TYPE_GROUP):
+        group = re.search(filt, i)
+        if group is not None:
+            n = localRoadFixations.getChild(i)
+            eyetracking.gazeObjectsDict[i] = n
+            if debug:
+                n.alpha(0.5)
+                n.drawOrder(10, bin=viz.BIN_TRANSPARENT)
+            else:
+                n.alpha(0)
+    for i in midblockCrossingFixations.getNodeNames(flags=viz.TYPE_GROUP):
+        group = re.search(filt, i)
+        if group is not None:
+            n = midblockCrossingFixations.getChild(i)
+            eyetracking.gazeObjectsDict[i] = n
+            if debug:
+                n.alpha(0.5)
+                n.drawOrder(10, bin=viz.BIN_TRANSPARENT)
+            else:
+                n.alpha(0)
+    for i in active_pedestrian_fixation_f.getNodeNames(flags=viz.TYPE_GROUP):
+        group = re.search(filt, i)
+        if group is not None:
+            n = active_pedestrian_fixation_f.getChild(i)
+            eyetracking.gazeObjectsDict[i] = n
+            print(i + " added to gazeObjectsDict")
+            if debug:
+                n.alpha(0.5)
+                n.drawOrder(10, bin=viz.BIN_TRANSPARENT)
+            else:
+                n.alpha(0)
+    for i in active_pedestrian_fixation_m.getNodeNames(flags=viz.TYPE_GROUP):
+        group = re.search(filt, i)
+        if group is not None:
+            n = active_pedestrian_fixation_m.getChild(i)
+            eyetracking.gazeObjectsDict[i] = n
+            print(i + " added to gazeObjectsDict")
+            if debug:
+                n.alpha(0.5)
+                n.drawOrder(10, bin=viz.BIN_TRANSPARENT)
+            else:
+                n.alpha(0)
+    for i in eHMI.getNodeNames(flags=viz.TYPE_GROUP):
+        group = re.search(filt, i)
+        if group is not None:
+            n = eHMI.getChild(i)
+            eyetracking.gazeObjectsDict[i] = n
+            if debug:
+                n.alpha(0.2)
+                n.drawOrder(10, bin=viz.BIN_TRANSPARENT)
+            else:
+                n.alpha(0)
+
+if __name__ == '__main__':
+    viz.go()
+    viztask.schedule(experimentSetup())
